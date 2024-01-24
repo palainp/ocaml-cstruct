@@ -14,11 +14,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-let read fd t =
-  Lwt_bytes.read fd t.Cstruct.buffer t.Cstruct.off t.Cstruct.len
+let read _fd _t = assert false
+  (* Lwt_bytes.read fd t.Cstruct.buffer t.Cstruct.off t.Cstruct.len *)
 
-let write fd t =
-  Lwt_bytes.write fd t.Cstruct.buffer t.Cstruct.off t.Cstruct.len
+let write _fd _t = assert false
+  (* Lwt_bytes.write fd t.Cstruct.buffer t.Cstruct.off t.Cstruct.len *)
 
 let complete op t =
   let open Lwt in
@@ -32,8 +32,8 @@ let complete op t =
     else loop t in
   loop t
 
-let sendto fd t flags dst =
-  Lwt_bytes.sendto fd t.Cstruct.buffer t.Cstruct.off t.Cstruct.len flags dst
+let sendto _fd _t _flags _dst = assert false
+  (* Lwt_bytes.sendto fd t.Cstruct.buffer t.Cstruct.off t.Cstruct.len flags dst *)
 
-let recvfrom fd t flags =
-  Lwt_bytes.recvfrom fd t.Cstruct.buffer t.Cstruct.off t.Cstruct.len flags
+let recvfrom _fd _t _flags = assert false
+  (* Lwt_bytes.recvfrom fd t.Cstruct.buffer t.Cstruct.off t.Cstruct.len flags *)

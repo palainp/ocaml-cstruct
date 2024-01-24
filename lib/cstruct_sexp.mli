@@ -16,13 +16,10 @@
 
 (** Sexpression serialisers for {!Cstruct.t} values *)
 
-type buffer = Cstruct.buffer
-(** [buffer] is an alias for the corresponding {!type:Cstruct.buffer} type *)
-
-val sexp_of_buffer : Cstruct.buffer -> Sexplib.Sexp.t
+val sexp_of_buffer : (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> Sexplib.Sexp.t
 (** [sexp_of_buffer b] returns the s-expression representation of the raw memory buffer [b] *)
 
-val buffer_of_sexp : Sexplib.Sexp.t -> Cstruct.buffer
+val buffer_of_sexp : Sexplib.Sexp.t -> (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
 (** [buffer_of_sexp s] returns a fresh memory buffer from the s-expression [s].
     [s] should have been constructed using {!sexp_of_buffer}. *)
 

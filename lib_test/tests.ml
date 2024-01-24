@@ -104,39 +104,6 @@ let fillv () =
   test [Cstruct.of_string "abc"; Cstruct.of_string ""; Cstruct.of_string "def"] 6;
   test [Cstruct.of_string "abc"; Cstruct.of_string ""; Cstruct.of_string "def"] 7
 
-let check_alignment alignment () =
-  (* Make the buffer big enough to find 4 aligned offsets within it *)
-  let expected = 4 in
-  let buf = Cstruct.create (expected * alignment) in
-  (* How many aligned offsets are there in this buffer? *)
-  let actual = ref 0 in
-  for i = 0 to Cstruct.length buf - 1 do
-    if Cstruct.(check_alignment (shift buf i) alignment) then incr actual
-  done;
-  Alcotest.(check int) "alignement" expected !actual
-
-let check_alignment_zero () =
-  let buf = Cstruct.create 512 in
-  try
-    let _ = Cstruct.check_alignment buf 0 in
-    Alcotest.fail "alignement zero should raise"
-  with
-    Invalid_argument _ -> ()
-
-let check_alignment_large () =
-  let check () =
-    Cstruct.check_alignment (Cstruct.create 1) (Int64.to_int 4294967296L)
-  in
-  if Sys.word_size > 32 then
-    let msg =
-      Fmt.str "alignement large: int-size:%d len=%d"
-        Sys.word_size (Int64.to_int 4294967296L)
-    in
-    Alcotest.(check bool) msg (check ()) false
-  else
-    try let _ = check () in Alcotest.fail "alignement should raise"
-    with Invalid_argument _ -> ()
-
 let rev_empty () =
   assert_cs_equal Cstruct.empty (Cstruct.rev Cstruct.empty)
 
@@ -234,12 +201,6 @@ let suite = [
   ];
   "append", [
     "append is concat", `Quick, append_is_concat ~n:5000
-  ];
-  "alignment", [
-    "aligned to 4096" , `Quick, check_alignment 4096;
-    "aligned to 512"  , `Quick, check_alignment 512;
-    "aligned to 0"    , `Quick, check_alignment_zero;
-    "aligned to large", `Quick, check_alignment_large;
   ];
   "rev", [
     "empty", `Quick, rev_empty;

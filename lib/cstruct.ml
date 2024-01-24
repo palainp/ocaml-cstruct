@@ -14,8 +14,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-type buffer = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-
 (* Note:
  *
  * We try to maintain the property that no constructed [t] can ever point out of
@@ -31,13 +29,13 @@ type buffer = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Arr
  *)
 
 type t = {
-  buffer: buffer;
+  buffer: bytes;
   off   : int;
   len   : int;
 }
 
 let pp_t ppf t =
-  Format.fprintf ppf "[%d,%d](%d)" t.off t.len (Bigarray.Array1.dim t.buffer)
+  Format.fprintf ppf "[%d,%d](%d)" t.off t.len (Bytes.length t.buffer)
 let string_t ppf str =
   Format.fprintf ppf "[%d]" (String.length str)
 let bytes_t ppf str =
@@ -82,33 +80,38 @@ let err_invalid_bounds f =
 let err_split t = err "Cstruct.split %a start=%d off=%d" pp_t t
 let err_iter t = err "Cstruct.iter %a i=%d len=%d" pp_t t
 
+external unsafe_blit_bytes_to_bigstring : Bytes.t -> int -> (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> int -> int -> unit = "caml_blit_string_to_bigstring" [@@noalloc]
+external unsafe_blit_bigstring_to_bytes : (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> int -> Bytes.t -> int -> int -> unit = "caml_blit_bigstring_to_string" [@@noalloc]
+external unsafe_compare_bytes : Bytes.t -> int -> Bytes.t -> int -> int -> int = "caml_compare_bytes" [@@noalloc]
+external unsafe_fill_bytes : Bytes.t -> int -> int -> int -> unit = "caml_memset_bytes" [@@noalloc]
+
 let of_bigarray ?(off=0) ?len buffer =
   let dim = Bigarray.Array1.dim buffer in
   let len =
     match len with
     | None     -> dim - off
     | Some len -> len in
-  if off < 0 || len < 0 || off + len < 0 || off + len > dim then err_of_bigarray off len
-  else { buffer; off; len }
+  if off < 0 || len < 0 || off + len < 0 || off + len > dim then
+    err_of_bigarray off len
+  else
+    let bytes = Bytes.create len in
+    unsafe_blit_bigstring_to_bytes buffer off bytes 0 len;
+    { buffer = bytes; off; len }
 
 let to_bigarray buffer =
-  Bigarray.Array1.sub buffer.buffer buffer.off buffer.len
+  let len = buffer.len - buffer.off in
+  let ba = Bigarray.(Array1.create char c_layout len) in
+  unsafe_blit_bytes_to_bigstring buffer.buffer buffer.off ba 0 buffer.len;
+  ba
 
 let create_unsafe len =
-  let buffer = Bigarray.(Array1.create char c_layout len) in
+  let buffer = Bytes.create len in
   { buffer ; len ; off = 0 }
 
 let check_bounds t len =
-  len >= 0 && Bigarray.Array1.dim t.buffer >= len
+  len >= 0 && Bytes.length t.buffer >= len
 
 let empty = create_unsafe 0
-
-external check_alignment_bigstring : buffer -> int -> int -> bool = "caml_check_alignment_bigstring"
-
-let check_alignment t alignment =
-  if alignment > 0 then
-    check_alignment_bigstring t.buffer t.off alignment
-  else invalid_arg "check_alignment must be positive integer"
 
 type byte = char
 
@@ -121,7 +124,7 @@ type uint32 = int32
 type uint64 = int64
 
 let debug t =
-  let max_len = Bigarray.Array1.dim t.buffer in
+  let max_len = Bytes.length t.buffer in
   if t.off+t.len > max_len || t.len < 0 || t.off < 0 then (
     Format.printf "ERROR: t.off+t.len=%d %a\n%!" (t.off+t.len) pp_t t;
     assert false;
@@ -188,26 +191,13 @@ let rec shiftv ts = function
     | t :: ts when n >= t.len -> shiftv ts (n - t.len)
     | t :: ts -> shift t n :: ts
 
-external unsafe_blit_bigstring_to_bigstring : buffer -> int -> buffer -> int -> int -> unit = "caml_blit_bigstring_to_bigstring" [@@noalloc]
-
-external unsafe_blit_string_to_bigstring : string -> int -> buffer -> int -> int -> unit = "caml_blit_string_to_bigstring" [@@noalloc]
-
-external unsafe_blit_bytes_to_bigstring : Bytes.t -> int -> buffer -> int -> int -> unit = "caml_blit_string_to_bigstring" [@@noalloc]
-
-external unsafe_blit_bigstring_to_bytes : buffer -> int -> Bytes.t -> int -> int -> unit = "caml_blit_bigstring_to_string" [@@noalloc]
-
-external unsafe_compare_bigstring : buffer -> int -> buffer -> int -> int -> int = "caml_compare_bigstring" [@@noalloc]
-
-external unsafe_fill_bigstring : buffer -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
-
 let copy_to_string caller src srcoff len =
   if len < 0 || srcoff < 0 || src.len - srcoff < len then
     err_copy_to_string caller src srcoff len
   else
-    let b = Bytes.create len in
-    unsafe_blit_bigstring_to_bytes src.buffer (src.off+srcoff) b 0 len;
-    (* The following call is safe, since b is not visible elsewhere. *)
-    Bytes.unsafe_to_string b
+    (* the following is safe, since String.sub creates fresh memory *)
+    let str = Bytes.unsafe_to_string src.buffer in
+    String.sub str (src.off + srcoff) len
 
 let copy = copy_to_string "copy"
 
@@ -217,8 +207,7 @@ let blit src srcoff dst dstoff len =
   else if dstoff < 0 || dst.len - dstoff < len then
     err_blit_dst src dst dstoff len
   else
-    unsafe_blit_bigstring_to_bigstring src.buffer (src.off+srcoff) dst.buffer
-      (dst.off+dstoff) len
+    Bytes.blit src.buffer (src.off + srcoff) dst.buffer (dst.off + dstoff) len
 
 let sub_copy cstr off len : t =
   let cstr2 = create_unsafe len in
@@ -231,7 +220,7 @@ let blit_from_string src srcoff dst dstoff len =
   else if dst.len - dstoff < len then
     err_blit_from_string_dst src dst dstoff len
   else
-    unsafe_blit_string_to_bigstring src srcoff dst.buffer (dst.off+dstoff) len
+    Bytes.blit_string src srcoff dst.buffer (dst.off + dstoff) len
 
 let blit_from_bytes src srcoff dst dstoff len =
   if len < 0 || srcoff < 0 || dstoff < 0 || Bytes.length src - srcoff < len then
@@ -239,7 +228,7 @@ let blit_from_bytes src srcoff dst dstoff len =
   else if dst.len - dstoff < len then
     err_blit_from_bytes_dst src dst dstoff len
   else
-    unsafe_blit_bytes_to_bigstring src srcoff dst.buffer (dst.off+dstoff) len
+    Bytes.blit src srcoff dst.buffer (dst.off + dstoff) len
 
 let blit_to_bytes src srcoff dst dstoff len =
   if len < 0 || srcoff < 0 || dstoff < 0 || src.len - srcoff < len then
@@ -247,14 +236,14 @@ let blit_to_bytes src srcoff dst dstoff len =
   else if Bytes.length dst - dstoff < len then
     err_blit_to_bytes_dst src dst dstoff len
   else
-    unsafe_blit_bigstring_to_bytes src.buffer (src.off+srcoff) dst dstoff len
+    Bytes.blit src.buffer (src.off + srcoff) dst dstoff len
 
 let compare t1 t2 =
   let l1 = t1.len
   and l2 = t2.len in
   match compare l1 l2 with
   | 0 ->
-    ( match unsafe_compare_bigstring t1.buffer t1.off t2.buffer t2.off l1 with
+    ( match unsafe_compare_bytes t1.buffer t1.off t2.buffer t2.off l1 with
       | 0 -> 0
       | r -> if r < 0 then -1 else 1 )
   | r -> r
@@ -262,7 +251,7 @@ let compare t1 t2 =
 let equal t1 t2 = compare t1 t2 = 0
 
 (* Note that this is only safe as long as all [t]s are coherent. *)
-let memset t x = unsafe_fill_bigstring t.buffer t.off t.len x
+let memset t x = unsafe_fill_bytes t.buffer t.off t.len x
 
 let create len =
   let t = create_unsafe len in
@@ -271,27 +260,27 @@ let create len =
 
 let set_uint8 t i c =
   if i >= t.len || i < 0 then err_invalid_bounds "set_uint8" t i 1
-  else Bigarray.Array1.set t.buffer (t.off+i) (Char.unsafe_chr c)
+  else Bytes.set_uint8 t.buffer (t.off+i) c
 
 let set_char t i c =
   if i >= t.len || i < 0 then err_invalid_bounds "set_char" t i 1
-  else Bigarray.Array1.set t.buffer (t.off+i) c
+  else Bytes.set t.buffer (t.off+i) c
 
 let get_uint8 t i =
   if i >= t.len || i < 0 then err_invalid_bounds "get_uint8" t i 1
-  else Char.code (Bigarray.Array1.get t.buffer (t.off+i))
+  else Bytes.get_uint8 t.buffer (t.off+i)
 
 let get_char t i =
   if i >= t.len || i < 0 then err_invalid_bounds "get_char" t i 1
-  else Bigarray.Array1.get t.buffer (t.off+i)
+  else Bytes.get t.buffer (t.off+i)
 
 
-external ba_set_int16 : buffer -> int -> uint16 -> unit = "%caml_bigstring_set16u"
-external ba_set_int32 : buffer -> int -> uint32 -> unit = "%caml_bigstring_set32u"
-external ba_set_int64 : buffer -> int -> uint64 -> unit = "%caml_bigstring_set64u"
-external ba_get_int16 : buffer -> int -> uint16 = "%caml_bigstring_get16u"
-external ba_get_int32 : buffer -> int -> uint32 = "%caml_bigstring_get32u"
-external ba_get_int64 : buffer -> int -> uint64 = "%caml_bigstring_get64u"
+external ba_set_int16 : Bytes.t -> int -> uint16 -> unit = "%caml_bytes_set16u"
+external ba_set_int32 : Bytes.t -> int -> uint32 -> unit = "%caml_bytes_set32u"
+external ba_set_int64 : Bytes.t -> int -> uint64 -> unit = "%caml_bytes_set64u"
+external ba_get_int16 : Bytes.t -> int -> uint16 = "%caml_bytes_get16u"
+external ba_get_int32 : Bytes.t -> int -> uint32 = "%caml_bytes_get32u"
+external ba_get_int64 : Bytes.t -> int -> uint64 = "%caml_bytes_get64u"
 
 external swap16 : int -> int = "%bswap16"
 external swap32 : int32 -> int32 = "%bswap_int32"
@@ -376,7 +365,7 @@ let copyv ts =
   let _ = List.fold_left
     (fun off src ->
       let x = length src in
-      unsafe_blit_bigstring_to_bytes src.buffer src.off dst off x;
+      Bytes.blit src.buffer src.off dst off x;
       off + x
     ) 0 ts in
   (* The following call is safe, since dst is not visible elsewhere. *)
@@ -416,7 +405,7 @@ let to_hex_string ?(off=0) ?len:sz t : string =
   else (
     let out = Bytes.create (2 * len) in
     for i=0 to len-1 do
-      let c = Char.code @@ Bigarray.Array1.get t.buffer (i+t.off+off) in
+      let c = get_uint8 t (i+off) in
       Bytes.set out (2*i) (nibble_to_char (c lsr 4));
       Bytes.set out (2*i+1) (nibble_to_char (c land 0xf));
     done;
@@ -500,7 +489,7 @@ let hexdump_pp fmt t =
   Format.pp_open_vbox fmt 0 ;
   for i = 0 to length t - 1 do
     let column = i mod 16 in
-    let c = Char.code (Bigarray.Array1.get t.buffer (t.off+i)) in
+    let c = get_uint8 t i in
     Format.fprintf fmt "%a%.2x%a" before column c after column
   done ;
   Format.pp_close_box fmt ()
@@ -575,389 +564,5 @@ let rev t =
   done;
   out
 
-(* Convenience function. *)
-
-external unsafe_blit_string_to_bigstring
-  : string -> int -> buffer -> int -> int -> unit
-  = "caml_blit_string_to_bigstring"
-[@@noalloc]
-
-let get { buffer; off; len; } zidx =
-  if zidx < 0 || zidx >= len then invalid_arg "index out of bounds" ;
-  Bigarray.Array1.get buffer (off + zidx)
-
-let get_byte { buffer; off; len; } zidx =
-  if zidx < 0 || zidx >= len then invalid_arg "index out of bounds" ;
-  Char.code (Bigarray.Array1.get buffer (off + zidx))
-
-let string ?(off= 0) ?len str =
-  let str_len = String.length str in
-  let len = match len with None -> str_len | Some len -> len in
-  if off < 0 || len < 0 || off + len > str_len then invalid_arg "index out of bounds" ;
-  let buffer = Bigarray.(Array1.create char c_layout str_len) in
-  unsafe_blit_string_to_bigstring str 0 buffer 0 str_len ;
-  of_bigarray ~off ~len buffer
-
-let buffer ?(off= 0) ?len buffer =
-  let buffer_len = Bigarray.Array1.dim buffer in
-  let len = match len with None -> buffer_len - off | Some len -> len in
-  if off < 0 || len < 0 || off + len > buffer_len then invalid_arg "index out of bounds" ;
-  of_bigarray ~off ~len buffer
-
-let start_pos { off; _ } = off
-let stop_pos { off; len; _ } = off + len
-
-let head ?(rev= false) ({ len; _ } as cs) =
-  if len = 0 then None
-  else Some (get_char cs (if rev then len - 1 else 0))
-
-let tail ?(rev= false) ({ buffer; off; len; } as cs) =
-  if len = 0 then cs
-  else if rev then of_bigarray ~off ~len:(len - 2) buffer
-  else of_bigarray ~off:(off + 1) ~len:(len - 1) buffer
-
-let is_empty { len; _ } = len = 0
-
-let is_prefix ~affix:({ len= alen; _ } as affix)
-    ({ len; _ } as cs) =
-  if alen > len then false
-  else
-    let max_zidx = alen - 1 in
-    let rec loop i =
-      if i > max_zidx then true
-      else if get_char affix i <> get_char cs i
-      then false else loop (succ i) in
-    loop 0
-
-let is_infix ~affix:({ len= alen; _ } as affix)
-    ({ len; _ } as cs) =
-  if alen > len then false
-  else
-    let max_zidx_a = alen - 1 in
-    let max_zidx_s = len - alen in
-    let rec loop i k =
-      if i > max_zidx_s then false
-      else if k > max_zidx_a then true
-      else if k > 0 then
-        if get_char affix k = get_char cs (i + k)
-        then loop i (succ k)
-        else loop (succ i) 0
-      else if get_char affix 0 = get_char cs i
-      then loop i 1
-      else loop (succ i) 0 in
-    loop 0 0
-
-let is_suffix ~affix:({ len= alen; _ } as affix)
-    ({ len; _ } as cs) =
-  if alen > len then false
-  else
-    let max_zidx = alen - 1 in
-    let max_zidx_a = alen - 1 in
-    let max_zidx_s = len - 1 in
-    let rec loop i =
-      if i > max_zidx then true
-      else if get_char affix (max_zidx_a - i) <> get_char cs (max_zidx_s - i)
-      then false else loop (succ i) in
-    loop 0
-
-let for_all sat cs =
-  let rec go acc i =
-    if i < length cs
-    then go (sat (get_char cs i) && acc) (succ i)
-    else acc in
-  go true 0
-
-let exists sat cs =
-  let rec go acc i =
-    if i < length cs
-    then go (sat (get_char cs i) || acc) (succ i)
-    else acc in
-  go false 0
-
-let start { buffer; off; _ } =
-  of_bigarray buffer ~off ~len:0
-
-let stop { buffer; off; len; } =
-  of_bigarray buffer ~off:(off + len) ~len:0
-
-let is_white = function ' ' | '\t' .. '\r' -> true | _ -> false
-
-let trim ?(drop = is_white) ({ buffer; off; len; } as cs) =
-  if len = 0 then cs
-  else
-    let max_zpos = len in
-    let max_zidx = len - 1 in
-    let rec left_pos i =
-      if i > max_zidx then max_zpos
-      else if drop (get_char cs i) then left_pos (succ i) else i in
-    let rec right_pos i =
-      if i < 0 then 0
-      else if drop (get_char cs i) then right_pos (pred i) else succ i in
-    let left = left_pos 0 in
-    if left = max_zpos
-    then of_bigarray buffer ~off:((off * 2 + len) / 2) ~len:0
-    else
-      let right = right_pos max_zidx in
-      if left = 0 && right = max_zpos then cs
-      else of_bigarray buffer ~off:(off + left) ~len:(right - left)
-
-let fspan ~min ~max ~sat ({ buffer= v; off; len; } as cs) =
-  if min < 0 then invalid_arg "span: negative min" ;
-  if max < 0 then invalid_arg "span: negative max" ;
-  if min > max || max = 0 then (buffer ~off:off ~len:0 v, cs)
-  else
-    let max_zidx = len - 1 in
-    let max_zidx =
-      let k = max - 1 in
-      if k > max_zidx || k < 0 then max_zidx else k in
-    let need_zidx = min in
-    let rec loop i =
-      if i <= max_zidx && sat (get_char cs i) then loop (i + 1)
-      else if i < need_zidx || i = 0 then buffer ~off:off ~len:0 v, cs
-      else if i = len then (cs, buffer ~off:(off + len) ~len:0 v)
-      else buffer ~off:off ~len:i v, buffer ~off:(off + i) ~len:(len - i) v in
-    loop 0
-
-let rspan ~min ~max ~sat ({ buffer= v; off; len; } as cs) =
-  if min < 0 then invalid_arg "span: negative min" ;
-  if max < 0 then invalid_arg "span: negative max" ;
-  if min > max || max = 0 then (cs, buffer ~off:(off + len) ~len:0 v)
-  else
-    let max_zidx = len - 1 in
-    let min_zidx =
-      let k = len - max in if k < 0 then 0 else k in
-    let need_zidx = len - min - 1 in
-    let rec loop i =
-      if i >= min_zidx && sat (get_char cs i) then loop (i - 1)
-      else if i > need_zidx || i = max_zidx then (cs, buffer ~off:(off + len) ~len:0 v)
-      else if i < 0 then (buffer ~off:off ~len:0 v, cs)
-      else (buffer ~off:off ~len:(i + 1) v, buffer ~off:(off + i + 1) ~len:(len - (i + 1)) v) in
-    loop max_zidx
-
-let span ?(rev= false) ?(min= 0) ?(max= max_int) ?(sat= fun _ -> true) cs =
-  match rev with
-  | true  -> rspan ~min ~max ~sat cs
-  | false -> fspan ~min ~max ~sat cs
-
-let take ?(rev= false) ?min ?max ?sat cs =
-  (if rev then snd else fst) @@ span ~rev ?min ?max ?sat cs
-
-let drop ?(rev= false) ?min ?max ?sat cs =
-  (if rev then fst else snd) @@ span ~rev ?min ?max ?sat cs
-
-let fcut ~sep:({ len= sep_len; _ } as sep)
-    ({ buffer= v; off; len; } as cs) =
-  if sep_len = 0 then invalid_arg "cut: empty separator" ;
-  let max_sep_zidx = sep_len - 1 in
-  let max_s_zidx = len - sep_len in
-  let rec check_sep i k =
-    if k > max_sep_zidx
-    then Some (buffer ~off:off ~len:i v,
-               buffer ~off:(off + i + sep_len) ~len:(len - i - sep_len) v)
-    else if get_char cs (i + k) = get_char sep k
-    then check_sep i (k + 1)
-    else scan (i + 1)
-  and scan i =
-    if i > max_s_zidx then None
-    else if get_char cs i = get_char sep 0
-    then check_sep i 1
-    else scan (i + 1) in
-  scan 0
-
-let rcut ~sep:({ len= sep_len; _ } as sep) ({ buffer= v; off; len; } as cs) =
-  if sep_len = 0 then invalid_arg "cut: empty separator" ;
-  let max_sep_zidx = sep_len - 1 in
-  let max_s_zidx = len - 1 in
-  let rec check_sep i k =
-    if k > max_sep_zidx then Some (buffer ~off:off ~len:i v,
-                                   buffer ~off:(off + i + sep_len) ~len:(len - i - sep_len) v)
-    else if get_char cs (i + k) = get_char sep k
-    then check_sep i (k + 1)
-    else rscan (i - 1)
-  and rscan i =
-    if i < 0 then None
-    else if get_char cs i = get_char sep 0
-    then check_sep i 1
-    else rscan (i - 1) in
-  rscan (max_s_zidx - max_sep_zidx)
-
-let cut ?(rev= false) ~sep cs = match rev with
-  | true  -> rcut ~sep cs
-  | false -> fcut ~sep cs
-
-let add_sub ~no_empty buf ~off ~len acc =
-  if len = 0
-  then ( if no_empty then acc else buffer ~off ~len buf :: acc )
-  else buffer ~off ~len buf :: acc
-
-let fcuts ~no_empty ~sep:({ len= sep_len; _ } as sep)
-      ({ buffer; off; len; } as cs) =
-  if sep_len = 0 then invalid_arg "cuts: empty separator" ;
-  let max_sep_zidx = sep_len - 1 in
-  let max_s_zidx = len - sep_len in
-  let rec check_sep zanchor i k acc =
-    if k > max_sep_zidx
-    then
-      let new_start = i + sep_len in
-      scan new_start new_start (add_sub ~no_empty buffer ~off:(off + zanchor) ~len:(i - zanchor) acc)
-    else
-      if get_char cs (i + k) = get_char sep k
-      then check_sep zanchor i (k + 1) acc
-      else scan zanchor (i + 1) acc
-  and scan zanchor i acc =
-    if i > max_s_zidx
-    then
-      if zanchor = 0 then (if no_empty && len = 0 then [] else [ cs ])
-      else List.rev (add_sub ~no_empty buffer ~off:(off + zanchor) ~len:(len - zanchor) acc)
-    else
-      if get_char cs i = get_char sep 0
-      then check_sep zanchor i 1 acc
-      else scan zanchor (i + 1) acc in
-  scan 0 0 []
-
-let rcuts ~no_empty ~sep:({ len= sep_len; _ } as sep)
-      ({ buffer; len; _ } as cs) =
-  if sep_len = 0 then invalid_arg "cuts: empty separator" ;
-  let s_len = len in
-  let max_sep_zidx = sep_len - 1 in
-  let max_s_zidx = len - 1 in
-  let rec check_sep zanchor i k acc =
-    if k > max_sep_zidx
-    then let off = i + sep_len in
-         rscan i (i - sep_len) (add_sub ~no_empty buffer ~off ~len:(zanchor - off) acc)
-    else
-      if get_char cs (i + k) = get_char cs k
-      then check_sep zanchor i (k + 1) acc
-      else rscan zanchor (i - 1) acc
-  and rscan zanchor i acc =
-    if i < 0 then
-      if zanchor = s_len then ( if no_empty && s_len = 0 then [] else [ cs ])
-      else add_sub ~no_empty buffer ~off:0 ~len:zanchor acc
-    else
-      if get_char cs i = get_char sep 0
-      then check_sep zanchor i 1 acc
-      else rscan zanchor (i - 1) acc in
-  rscan s_len (max_s_zidx - max_sep_zidx) []
-
-let cuts ?(rev= false) ?(empty= true) ~sep cs = match rev with
-  | true  -> rcuts ~no_empty:(not empty) ~sep cs
-  | false -> fcuts ~no_empty:(not empty) ~sep cs
-
-let fields ?(empty= false) ?(is_sep= is_white) ({ buffer; off; len; } as cs) =
-  let no_empty = not empty in
-  let max_pos = len in
-  let rec loop i end_pos acc =
-    if i < 0 then begin
-        if end_pos = len
-        then ( if no_empty && len = 0 then [] else [ cs ])
-        else add_sub ~no_empty buffer ~off:off ~len:(end_pos - (i + 1)) acc
-      end else begin
-        if not (is_sep (get_char cs i))
-        then loop (i - 1) end_pos acc
-        else loop (i - 1) i (add_sub ~no_empty buffer ~off:(off + i + 1) ~len:(end_pos - (i + 1)) acc)
-      end in
-  loop (max_pos - 1) max_pos []
-
-let ffind sat ({ buffer= v; len; _ } as cs) =
-  let max_idx = len - 1 in
-  let rec loop i =
-    if i > max_idx then None
-    else if sat (get_char cs i)
-    then Some (buffer ~off:i ~len:1 v)
-    else loop (i + 1) in
-  loop 0
-
-let rfind sat ({ buffer= v; len; _ } as cs) =
-  let rec loop i =
-    if i < 0 then None
-    else if sat (get_char cs i)
-    then Some (buffer ~off:i ~len:1 v)
-    else loop (i - 1) in
-  loop (len - 1)
-
-let find ?(rev= false) sat cs = match rev with
-  | true  -> rfind sat cs
-  | false -> ffind sat cs
-
-let ffind_sub ~sub:({ len= sub_len; _ } as sub) ({ buffer= v; off; len; } as cs) =
-  if sub_len > len then None
-  else
-    let max_zidx_sub = sub_len - 1 in
-    let max_zidx_s = len - sub_len in
-    let rec loop i k =
-      if i > max_zidx_s then None
-      else if k > max_zidx_sub then Some (buffer v ~off:(off + i) ~len:sub_len)
-      else if k > 0
-      then ( if get_char sub k = get_char cs (i + k)
-             then loop i (k + 1)
-             else loop (i + 1) 0 )
-      else if get_char sub 0 = get_char cs i
-      then loop i 1
-      else loop (i + 1) 0 in
-    loop 0 0
-
-let rfind_sub ~sub:({ len= sub_len; _ } as sub) ({ buffer= v; len; _ } as cs) =
-  if sub_len > len then None
-  else
-    let max_zidx_sub = sub_len - 1 in
-    let rec loop i k =
-      if i < 0 then None
-      else if k > max_zidx_sub then Some (buffer v ~off:i ~len:sub_len)
-      else if k > 0
-      then ( if get_char sub k = get_char cs (i + k)
-             then loop i (k + 1)
-             else loop (i - 1) 0 )
-      else if get_char sub 0 = get_char cs i
-      then loop i 1
-      else loop (i - 1) 0 in
-    loop (len - sub_len) 0
-
-let find_sub ?(rev= false) ~sub cs = match rev with
-  | true  -> rfind_sub ~sub cs
-  | false -> ffind_sub ~sub cs
-
-let filter sat ({ len; _ } as cs) =
-  if len = 0 then empty
-  else
-    let b = create len in
-    let max_zidx = len - 1 in
-    let rec loop b k i =
-      if i > max_zidx
-      then (if k = len then b else sub b 0 k)
-      else
-        let chr = get_char cs i in
-        if sat chr then ( set_char b k chr ; loop b (k + 1) (i + 1))
-        else loop b k (i + 1) in
-    loop b 0 0
-
-let filter_map f ({ len; _ } as cs) =
-  if len = 0 then empty
-  else
-    let b = create len in
-    let max_zidx = len - 1 in
-    let rec loop b k i =
-      if i > max_zidx
-      then (if k = len then b else sub b 0 k)
-      else match f (get_char cs i) with
-           | Some chr ->
-              set_char b i chr ;
-              loop b (k + 1) (i + 1)
-           | None ->
-              loop b k (i + 1) in
-    loop b 0 0
-
-let map f ({ len; _ } as cs) =
-  if len = 0 then empty
-  else
-    let b = create len in
-    for i = 0 to len - 1 do
-      set_char b i (f (get_char cs i))
-    done ; b
-
-let mapi f ({ len; _ } as cs) =
-  if len = 0 then empty
-  else
-    let b = create len in
-    for i = 0 to len - 1 do
-      set_char b i (f i (get_char cs i))
-    done ; b
+let check_alignment _ _ = true
+(* deprecated *)

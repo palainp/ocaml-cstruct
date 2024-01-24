@@ -16,7 +16,8 @@
  *)
 
 let to_string { Cstruct.buffer; off; len } =
-  Printf.sprintf "buffer length = %d; off=%d; len=%d" (Bigarray.Array1.dim buffer) off len
+  Printf.sprintf "buffer length = %d; off=%d; len=%d"
+    (Bytes.length buffer) off len
 
 (* Check we can create and use an empty cstruct *)
 let test_empty_cstruct () =

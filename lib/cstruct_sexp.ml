@@ -16,7 +16,6 @@
 
 open Sexplib
 
-type buffer = Cstruct.buffer
 type t = Cstruct.t
 
 let buffer_of_sexp b = Conv.bigstring_of_sexp b

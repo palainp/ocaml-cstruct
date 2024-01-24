@@ -55,27 +55,19 @@ caml_blit_bigstring_to_bigstring(value val_buf1, value val_ofs1, value val_buf2,
 }
 
 CAMLprim value
-caml_compare_bigstring(value val_buf1, value val_ofs1, value val_buf2, value val_ofs2, value val_len)
+caml_compare_bytes(value val_buf1, value val_ofs1, value val_buf2, value val_ofs2, value val_len)
 {
-  int res = memcmp((char*)Caml_ba_data_val(val_buf1) + Long_val(val_ofs1),
-                   (char*)Caml_ba_data_val(val_buf2) + Long_val(val_ofs2),
+  int res = memcmp(Bytes_val(val_buf1) + Long_val(val_ofs1),
+                   Bytes_val(val_buf2) + Long_val(val_ofs2),
                    Long_val(val_len));
   return Val_int(res);
 }
 
 CAMLprim value
-caml_fill_bigstring(value val_buf, value val_ofs, value val_len, value val_byte)
+caml_memset_bytes(value val_buf, value val_ofs, value val_len, value val_byte)
 {
-  memset((char*)Caml_ba_data_val(val_buf) + Long_val(val_ofs),
+  memset(Bytes_val(val_buf) + Long_val(val_ofs),
          Int_val(val_byte),
          Long_val(val_len));
   return Val_unit;
-}
-
-CAMLprim value
-caml_check_alignment_bigstring(value val_buf, value val_ofs, value val_alignment)
-{
-  uint64_t address = (uint64_t) ((char *)Caml_ba_data_val(val_buf) + Long_val(val_ofs));
-  uintnat alignment = Unsigned_long_val(val_alignment);
-  return Val_bool(address % alignment == 0);
 }
